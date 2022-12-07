@@ -1,0 +1,371 @@
+---
+title: "fiola_sentiment_analysis"
+output:
+  pdf_document: default
+  html_document: default
+date: "2022-11-30"
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+                  
+library(tidyverse)
+library(tidytext)
+library(wordcloud)
+library(stringi)
+library(textdata)
+library(textclean)
+library(tm) #text mining
+library(widyr) #for pairwise correlation based on variables. Just makes things neater compared to dplyr. pairwise_cor(variable,feature,correlating_variable, sort = True) Can also filter each item based on what you want to see.
+library(ggplot2)
+library(ggpmisc)
+library(scales)
+library(igraph)
+library(ggraph)
+library(zoo)
+```
+Load Data
+```{r}
+fiola_df <- read.csv("fiola_reviews.csv",sep= ",")
+fiola_df$dates <- as.Date(fiola_df$dates, format = "%m/%d/%Y")
+```
+Clean and Prep for Analysis
+```{r}
+#Load Lexicon of Stop words- words to be filtered out because they hold no inherent meaning. -Lexicon contains the word Best, so jury is out on this one
+data("stop_words")
+
+fiola_review_text <- fiola_df %>%
+  select(review)
+
+stri_enc_mark(fiola_review_text$review[1:10]) #Declared encodings are either native or ASCII. While UTF-8 is compatible, should make things consistent.
+fiola_review_text$review <- sapply(fiola_review_text$review,
+                                   function(enc) iconv(enc,
+                                                       "latin1",
+                                                       "ASCII",
+                                                       sub = " "))
+#change case to uniform and replace contractions. Used textclean to save on lines
+fiola_review_text$review <- tolower(fiola_review_text$review)
+fiola_review_text$review <- replace_contraction(fiola_review_text$review)
+
+#replace potential typos if any
+fiola_review_text$review <- gsub("desert","dessert", fiola_review_text$review)
+
+#remove numbers and punctuation
+fiola_review_text$review <- removeNumbers(fiola_review_text$review)
+fiola_review_text$review <- removePunctuation(fiola_review_text$review)
+
+#find negations
+negation_words <- c("not",
+                    "no",
+                    "without",
+                    "never",
+                    "bad",
+                    "none",
+                    "never",
+                    "nobody",
+                    "nowhere",
+                    "neither",
+                    "nothing"
+)
+
+shifted_words <- fiola_review_text %>%
+  unnest_tokens(bigram, review, token = "ngrams", n = 2)%>%                 #splits all text into word pairs
+  count(bigram, sort = TRUE) %>%                                            #counts most reoccuring pairs, ordered from most comon
+  separate(bigram, c("word1", "word2"), sep = " ")%>%                       #separates the pairs back into singular words
+  filter(word1 %in% negation_words & !word2 %in% stop_words$word)%>%        #want to find negations for words that may matter. (not stop words)
+  inner_join(get_sentiments("bing"), by = c(word2 = "word"))%>%             #use bing lexicon to check sentiment of second word
+  mutate(sentiment = ifelse(sentiment == "positive", 1, -1)) %>%            #If sentiment positive, assign score of 1, otherwise -1
+  mutate(score = sentiment * n) %>%                                         #Score is then tallied.
+  mutate(word2 = reorder(word2, score))                                     #High Positive Score means negative sentiment with negator. 
+
+
+shifted_words$phrases <- paste(shifted_words$word1, " ", shifted_words$word2) #concatenate words
+
+#Grab top 25 most common negations
+negated_phrases <- shifted_words$phrases[1:25]
+synonyms <- c("expensive", "great", "expensive", "favourite", "dislike",
+              "good", "satisfied", "great", "mediocre", "dislike", 
+              "easy", "unpleasant", "slow", "cool", "certain", 
+              "mediocre", "stale", "fresh", "unimpressed", "modest", 
+              "unbothered", "unbothered", "satisfied", "satisfied", "satisfied"
+              )
+#replace negations with synonyms
+fiola_review_text$review <- mgsub(fiola_review_text$review,negated_phrases,synonyms)
+
+#If there are words that want to be ignored               
+ignore_words <- data_frame(word = c("food","service","restaurant","fiola","mare","bit","die"))
+
+#words frequency table
+word_freq_table<- fiola_review_text %>% 
+  unnest_tokens(word, review) %>%
+  anti_join(stop_words) %>%
+  anti_join(ignore_words) %>%
+  count(word, sort = TRUE)
+
+#word_freq_table
+```
+Word Polarity
+```{r}
+
+#If I wanted to make a pampthlet or something. Not really relevant
+#wordcloud(words = word_freq_table$word, freq = word_freq_table$n, min.freq = 1,           
+#          max.words=60, random.order=FALSE, rot.per=0.25, scale = c(3,0.05),            
+#          colors=brewer.pal(8, "RdYlBu"))
+
+#Most common Sentimental words using Bing Lexicon. Same code but with synonyms replaced
+fiola_review_text %>%
+  unnest_tokens(word, review) %>%
+  anti_join(stop_words) %>%
+  anti_join(ignore_words) %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  filter(n > 20) %>%       #filter is technically redundant since we're slicing anyways
+  mutate(word = reorder(word, n)) %>%
+  mutate(percent = round(n/sum(n), 3)) %>%
+  group_by(sentiment) %>%  #Only want top 20 of each one to prevent crowding.
+  slice(1:20) %>%          # Can change slice size if needed             
+  ggplot(aes(x = word, y = percent, fill = sentiment, label = percent)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  geom_text(aes(y = 0.7*percent)) +
+  labs(title = "Fiola Mare Word Polarity (bing)") +
+  coord_flip() + 
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Words such as die, desert, decadent, fried, seem to be mispellings, or show the opposite sentiment. Die should be used in the phrase "to die for" and decadent is a positive sentiment. fried is a neutral term. However, they won't be significant compared to the large amount of already positive reoccuring words, so they will just be omitted.
+```
+
+```{r}
+bing_mean_score <- word_freq_table %>% 
+  inner_join(get_sentiments("bing")) %>%
+  mutate(sentiment = ifelse(sentiment == "positive", 1, -1)) %>%
+  summarise(mean = mean(sentiment))
+bing_mean_score<-rescale(bing_mean_score$mean, to = c(1,5), from = c(-1,1)) # rescale the range to 5 star range.
+
+afinn_mean_score <- word_freq_table %>% 
+  inner_join(get_sentiments("afinn"))%>%
+  summarise(mean = mean(value))
+afinn_mean_score <-rescale(afinn_mean_score$mean, to = c(1,5), from = c(-5,5))
+
+#2.92 and 2.99 respectively. Which is odd since it suggests on average, people had a less than average time. However, means were not weighted.
+
+bing_mean_score <- word_freq_table %>% 
+  inner_join(get_sentiments("bing")) %>%
+  mutate(sentiment = ifelse(sentiment == "positive", 1, -1)) %>%
+  summarise(mean = weighted.mean(sentiment,n))
+bing_mean_score<-rescale(bing_mean_score$mean, to = c(1,5), from = c(-1,1)) 
+
+afinn_mean_score <- word_freq_table %>% 
+  inner_join(get_sentiments("afinn"))%>%
+  summarise(mean = weighted.mean(value,n))
+afinn_mean_score <-rescale(afinn_mean_score$mean, to = c(1,5), from = c(-5,5))
+
+#New scores 4.05 and 3.67 respectively. Suggesting that, yes, people did it fact enjoy themselves on average. But lower than the star value of 4.5
+#Suggests a predisposition for people to rate things higher than their reviews. Or maybe people who disliked it just had alot to say.
+
+#Correlation terms
+fiola_corr_terms <- fiola_review_text %>%
+  mutate(review_num = row_number()) %>%            #assign number to each review
+  unnest_tokens(word, review) %>%                  #break apart text block
+  filter(!word %in% stop_words$word) %>%           #remove stop words
+  filter(!word %in% ignore_words$word) %>%
+  group_by(word) %>%                            
+  filter(n() >= 5)%>%                              #words that appear more than 5 times
+  pairwise_cor(word, review_num, sort = TRUE)
+
+#A lot of menu items. Too many to properly reasonably filter out. But can provide insights to which items are ordered the most.
+
+#Want n count too. grab n then leftjoin.
+fiola_bigrams <- fiola_review_text %>%
+  unnest_tokens(bigram, review, token = "ngrams", n = 2) %>%
+  filter(!is.na(bigram))%>%
+  count(bigram, sort = TRUE)%>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+fiola_corr_terms_n <- fiola_corr_terms %>%
+                      left_join(fiola_bigrams, by = c('item1' = 'word1','item2' = 'word2'))
+
+#na in n due to wrong order of words. filter out nas.
+
+
+fiola_corr_terms_n <- fiola_corr_terms_n %>%
+                      filter(!is.na(n))
+
+fiola_corr_terms_n 
+#You would think words like panna cotta would have a correlation of 1, but the differential may be due to spacing. or capitalizations or whatever. Not sure how function chooses to calculate it.
+
+
+fiola_bigram_graph <- fiola_corr_terms_n %>%
+                      filter(correlation >= 0.50) %>%
+                      slice(1:60)%>%
+                      graph_from_data_frame()
+
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(fiola_bigram_graph, layout = "fr") +
+                           geom_edge_link(aes(edge_alpha = n), show.legend = FALSE, arrow = a, end_cap = circle(.07, 'inches')) +
+                           geom_node_point(color = "lightblue", size = 5) +
+                           geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+                           theme_void()
+
+#Convert into a network. But with stop words removed, will it even work?
+
+bigram_network_df <- fiola_review_text %>%                                       #same as fiola_bigrams with 2 extra filters.
+   unnest_tokens(bigram, review, token = "ngrams", n = 2) %>%
+   separate(bigram, c("word1", "word2"), sep = " ") %>%
+   filter(!word1 %in% stop_words$word & !word2 %in% stop_words$word) %>%
+   count(word1, word2, sort = TRUE) %>%
+   filter(n > 5)
+
+bigram_network_df <- fiola_bigrams %>%                                           #redundant, but helps follow.
+   filter(!word1 %in% stop_words$word & !word2 %in% stop_words$word) %>%
+   filter(n > 5)
+ 
+bigrams_network <- graph_from_data_frame(bigram_network_df)
+
+#Centrality Measures of Network
+deg <- degree(bigrams_network, mode = "all")           #number of adjacent edges
+core <- coreness(bigrams_network, mode = "all")        #helps choose core and periphery of network
+betw <- betweenness(bigrams_network)                   #number of shortest paths between nodes
+eigen <- eigen_centrality(bigrams_network, directed = TRUE)   #measure of influence of a node in a network. helps pick most important nodes
+members <- cluster_walktrap(bigrams_network)                  #function tries to find densely connected subgraphs
+
+bigrams_network <- simplify(bigrams_network, 
+                            remove.multiple = FALSE,
+                            remove.loops = TRUE)
+
+V(bigrams_network)$color <- members$membership+1
+
+# Use Corness for size. Coreness -> mean (average distance to all the other nodes, diffusion of information)
+#plot(bigrams_network,
+#     layout = layout_with_fr,
+#     vertex.label.color = "black",
+#     vertex.label.cex = 0.9,
+#     vertex.label.dist = 0,
+#     vertex.frame.color = 0,
+#     vertex.size = core*10, 
+#     edge.arrow.size = 0.01,
+#     edge.curved = 0.7,
+#     edge.color = "gray",
+#     main = "Bigram Communities (Coreness)"
+#Not enough content in reviews for nice looking chains, especially with stop words removed.
+```
+Things to check:
+*Sentiment change over time.
+*From which location has the highest avg sentiment.
+*Filtering by "extras"
+*Do I wanna make a dashboard out of all this? Or just knit and call it a day?
+```{r}
+#Sent Change over Time
+
+#Grab main df file and replace with cleaned review
+fiola_df_new <- fiola_df
+fiola_df_new$review <- fiola_review_text$review
+
+#Add up total sentiment in each review
+bing <- get_sentiments("bing")%>%
+  mutate(sentiment = ifelse(sentiment == "positive", 1, -1))
+
+#what I want to do: If word is in review, sum(sentiment) in feel(s) category
+
+fiola_review_text_tally <- fiola_review_text %>%
+  mutate(review_num = row_number()) %>%            #assign number to each review
+  unnest_tokens(word, review) %>%                  #break apart text block
+  filter(!word %in% stop_words$word) %>%           #remove stop words
+  filter(!word %in% ignore_words$word)%>%
+  left_join(bing, by = c("word" = "word"))%>%
+  mutate(sentiment = ifelse(is.na(sentiment), 0, sentiment))     #Turn NAs = 0
+
+fiola_sentiment_tally <- fiola_review_text_tally %>%
+  group_by(review_num)%>%
+  summarize(sentiment_tally = sum(sentiment))
+
+fiola_sentiment <- cbind(fiola_df_new, sentiment_tally = fiola_sentiment_tally$sentiment_tally)
+
+fiola_sentiment %>%
+  mutate(rating = as.factor(rating))%>%
+  ggplot(aes(x = rating, y = sentiment_tally, group = rating, color = rating)) +
+  geom_boxplot() +
+  geom_jitter(width=0.25, alpha=0.15)+
+  coord_flip() +
+  labs(title = "customer rating to actual review sentiment", x = "customer ratings", y= "review sentiment score")+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.position="none")+
+  ylim(-5,35)                             #Some Outliers making graph look ugly. set limits
+
+#Can see a clear progression in review sentiment. Some people seem to rave about it. Big chunk of the 5 star ratings have negative sentiment reviews. Wonder what thats about.
+# fiola_sentiment %>%
+#   filter(rating == 5 & sentiment_tally < 5)
+#Turns out people who write huge raving reviews, use a tonne of negation words that end up muddying up the data. So much negation and improper grammar. Will probably be very difficult to be able to clean it out.
+
+fiola_sentiment <- fiola_sentiment %>%
+  mutate(date = dates) %>%
+  separate(dates, sep="-", into = c("year", "month", "day"))
+
+fiola_sentiment <- fiola_sentiment %>%
+  mutate(date = as.POSIXct(date,tz= "UTC"))
+
+#Rolling Avg Sentiment
+
+avg_sentiment <- fiola_sentiment %>%
+  mutate(monthly_avg= rollmean(sentiment_tally, 30,
+                             align="left",
+                             fill=0)) %>%
+  ggplot(aes(x=date,
+             y=sentiment_tally)) +
+  geom_col(fill="pink")+
+  geom_line(aes(y = monthly_avg), 
+            color = "red", 
+            size = .75)+
+  geom_smooth(method=lm,level = 0.95)+
+  stat_poly_line() +
+  stat_poly_eq(aes(label = paste(after_stat(eq.label),
+                                 after_stat(rr.label), sep = "*\", \"*"))) +
+  labs(title="Average Review Sentiment Fiola Mare",
+       y="Review Sentiment Score")+
+  ylim(-5,15)
+  
+avg_sentiment
+
+#Way too much variation for a regression line to fit the graph well, as evident by the hilarious R2 = 0.01. However, visually there is a reduction in highs for overall review sentiment, and a consistent downtrend. Some of which might be explained by covid and strains on supply chains, or a potential lagging indicator on seafood quality, or less positive sentiment as a result of inflating food prices.
+```
+Who likes this place the best.
+```{r}
+#Avg Rating and sentiment score by location
+#Too many cities so will separate by state.
+fiola_sentiment <- fiola_sentiment %>% 
+   separate(location, sep=", ", into = c("city","state"))
+#Could change names of states and countries to acronyms, but don't think it would change insights all that much
+
+fiola_sentiment %>%
+  group_by(state,rating)%>%
+  summarise(n=n())%>%
+  arrange(desc(n))%>%
+  arrange(desc(rating))%>%
+  arrange(state)
+
+fiola_sentiment %>%
+  group_by(state)%>%
+  summarise(avg_mean = mean(rating), avg_sent = mean(sentiment_tally), n=n()) %>%
+  arrange(desc(n))
+#I suppose the 2 hawaiians who went really liked it. Of the top 5 states that reviewed it, it appears that the states that enjoyed + frequented it the most were NewYork> Maryland> VA> DC> CA. Washington would also be last if we combined the state name and shorthand for 52 total reviews. Although some of those may be referring to Washington DC and not Washington State, and its not really worth it to check. It seems that states that live near the west enjoy it more than states on the East. Whether this is due to a difference in flavor profiles or seafood quality may merit further investigation.
+
+fiola_sentiment %>%
+  mutate(bin = cut_interval(useful, n = 3))%>%
+  mutate(useful_scale = case_when(bin == "[0,6]" ~ "a bit useful",
+                                 bin == "(6,12]"~ "useful",
+                                 bin == "(12,18]" ~ "very useful"))%>%
+  group_by(rating)%>%
+  count(useful_scale) %>%
+  arrange(desc(rating))
+
+fiola_sentiment %>%
+  filter(useful > 5) %>%
+  group_by(rating)%>%
+  summarise(useful_avg = mean(useful), useful_median = median(useful), n=n())
+#Seems like most of the "useful reviews" have a rating of either 1 or 5. Which is interesting since it would suggest those reviewers may have had plausible reasons to review the way they did. This could give motivation to search out these reviews to check them out to see what they have to say.
+
+#Don't think I need to dashboard things.
+```
+

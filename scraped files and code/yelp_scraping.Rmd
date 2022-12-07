@@ -1,0 +1,116 @@
+---
+title: "initial_scraping_code"
+output: html_document
+date: '2022-11-29'
+---
+```{r}
+library(rvest)
+library(tidyverse)
+library(data.table)
+library(rlist)
+```
+
+```{r}
+df_final <- list()
+#Total Pages
+pagenums <- page%>%
+  html_elements(xpath = "//div[@aria-label = 'Pagination navigation']")%>%
+  html_text()%>%
+  str_extract('of \\d+')%>%
+  str_remove('of ')%>%
+  as.numeric()
+
+page_sequence <- seq(from = 0, to = (pagenums * 10)-10, by=10)
+page_sequence
+```
+
+
+```{r}
+for (i in page_sequence) {
+  #url object
+url = sprintf("https://www.yelp.com/biz/fiola-mare-washington?start=%d&sort_by=date_asc",i)
+#convert to html object
+page <- read_html(url)
+  
+#usernames
+usernames <- page %>%
+  html_elements(xpath = "//div[starts-with(@class, ' user-passport')]") %>%
+  html_elements(xpath = ".//a[starts-with(@href, '/user_details')]")%>%
+  html_text()
+#.// means to look within previous element
+
+#locations
+locations <- page %>%
+  html_elements(xpath = "//div[starts-with(@class, ' user-passport')]") %>%
+  html_elements(xpath = ".//span[@class= ' css-qgunke']")%>%
+  html_text() %>%
+  .[.!="Location"] #we want all values not equal to location
+
+#reviews
+reviews <- page %>% 
+  html_elements(xpath = "//div[starts-with(@class,' review')]")%>%
+  html_elements(xpath = "(.//p[starts-with(@class,'comment')])[1]")%>%
+  html_text()
+#finds first instance of comment. does not include replies.
+
+#ratings
+ratings <- page %>%
+  html_elements(xpath = "//div[starts-with(@class,' review')]")%>%
+  html_elements(xpath = "(.//div[contains(@aria-label,'star rating')])[1]")%>%
+  html_attr("aria-label") %>%
+  str_remove_all(" star rating") %>%
+  as.numeric()
+
+#dates
+date_review <- page %>%
+  html_elements(xpath = "//div[starts-with(@class,' review')]")%>%
+  html_elements(xpath = "(.//span[@class = ' css-chan6m'])[1]") %>%
+  html_text()
+
+#useful/funny/cool
+extra_info <- page %>%
+  html_elements(xpath = "//div[starts-with(@class,' review')]")%>%
+  html_elements(xpath = ".//button[@type = 'submit']")%>%
+  html_text() %>%
+  .[.!=""]%>%
+  .[.!="Read more"]
+
+extra_info_extract <- function(ei, txt) {
+  str_extract(ei, paste0(txt, ".*")) %>%
+  .[!is.na(.)] %>% 
+  str_extract("\\d+") %>%
+  str_replace_na("0") %>%
+  as.numeric()
+}
+useful_r <- extra_info_extract(extra_info,"Useful")
+funny_r <- extra_info_extract(extra_info,"Funny")
+cool_r <- extra_info_extract(extra_info,"Cool")
+
+df_new <- list(username = usernames,
+               dates = date_review,
+               location = locations,
+               review = reviews,
+               rating = ratings,
+               useful = useful_r,
+               funny = funny_r, 
+               cool = cool_r
+               )
+
+df_new_table <- as.data.frame(df_new)
+
+df_final <- rbindlist(list(df_final,df_new_table))
+
+Sys.sleep(sample(c(5,10), 1)) #code pauses between each iteration so yelp doesnt boot us
+}
+
+
+```
+
+```{r}
+saved_df <- df_final
+
+write.csv(saved_df,"fiola_reviews.csv", row.names = F)
+```
+
+
+
